@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.record;
 
 import java.util.Collection;
 
@@ -26,29 +26,48 @@ import org.apache.avro.SchemaBuilder;
  * Builds the AVRO Schema from the user-supplied JSON encoded schema.
  */
 public class AvroSchemaBuilder {
-  private static SchemaBuilder.FieldAssembler<Schema>
-      addAvroField(SchemaBuilder.FieldAssembler<Schema> builder, RowBuilderType type, String name) {
+  public static final String ROWBUILDERTYPE_PROP = "rowBuilderType";
+
+  private static SchemaBuilder.FieldAssembler<Schema> addAvroField(
+      SchemaBuilder.FieldAssembler<Schema> builder, RowBuilderField field, String name) {
+
+    RowBuilderType type = field.getRowBuilderType();
+
+    SchemaBuilder.FieldBuilder<Schema> fieldBuilder = builder
+        // configure the field name
+        .name(name);
+
+    // pass in alias
+    if (field.getFilterVariableName() != null && field.getFilterVariableName().length() > 0)
+      fieldBuilder = fieldBuilder.aliases(field.getFilterVariableName());
+
+    SchemaBuilder.BaseTypeBuilder<SchemaBuilder.FieldAssembler<Schema>> intermediate = fieldBuilder
+        // encode rowBuilderType so we can only operator on schema
+        .prop(ROWBUILDERTYPE_PROP, type.name())
+        // all fields are optional
+        .type().optional();
+
     switch (type) {
       case String:
-        return builder.optionalString(name);
+        return intermediate.stringType();
 
       case Long:
-        return builder.optionalLong(name);
+        return intermediate.longType();
 
       case Integer:
-        return builder.optionalInt(name);
+        return intermediate.intType();
 
       case Double:
-        return builder.optionalDouble(name);
+        return intermediate.doubleType();
 
       case Float:
-        return builder.optionalFloat(name);
+        return intermediate.floatType();
 
       case Boolean:
-        return builder.optionalBoolean(name);
+        return intermediate.booleanType();
 
       case Bytes:
-        return builder.optionalBytes(name);
+        return intermediate.bytesType();
 
       default:
         throw new IllegalArgumentException("Unsupported type '" + type + "'");
@@ -78,7 +97,6 @@ public class AvroSchemaBuilder {
 
       String columnFamily = schemaField.getColumnFamily();
       String columnQualifier = schemaField.getColumnQualifier();
-      RowBuilderType type = schemaField.getRowBuilderType();
 
       if (columnQualifier != null) {
         if (lastColumnFamily == null || !lastColumnFamily.equals(columnFamily)) {
@@ -92,17 +110,18 @@ public class AvroSchemaBuilder {
         }
 
         // add the current field
-        columnFieldsAssembler = addAvroField(columnFieldsAssembler, type, columnQualifier);
+        columnFieldsAssembler = addAvroField(columnFieldsAssembler, schemaField, columnQualifier);
       } else {
         // close previous record
         rootAssembler = closeFieldAssembler(rootAssembler, columnFieldsAssembler, lastColumnFamily);
         columnFieldsAssembler = null;
 
         // add the top-level field
-        rootAssembler = addAvroField(rootAssembler, type, columnFamily);
+        rootAssembler = addAvroField(rootAssembler, schemaField, columnFamily);
       }
 
       lastColumnFamily = columnFamily;
+
     }
 
     rootAssembler = closeFieldAssembler(rootAssembler, columnFieldsAssembler, lastColumnFamily);

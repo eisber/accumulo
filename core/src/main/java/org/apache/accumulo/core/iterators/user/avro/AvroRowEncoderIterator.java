@@ -18,96 +18,301 @@
 package org.apache.accumulo.core.iterators.user.avro;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
+import org.apache.accumulo.core.data.ByteSequence;
 import org.apache.accumulo.core.data.Key;
+import org.apache.accumulo.core.data.PartialKey;
+import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.iterators.IteratorEnvironment;
+import org.apache.accumulo.core.iterators.OptionDescriber;
 import org.apache.accumulo.core.iterators.SortedKeyValueIterator;
+import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowComputedColumns;
+import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowConsumer;
+import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowFilter;
+import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowSerializer;
+import org.apache.accumulo.core.iterators.user.avro.record.AvroFastRecord;
+import org.apache.accumulo.core.iterators.user.avro.record.AvroSchemaBuilder;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderCellConsumer;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderField;
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData.Record;
-import org.apache.avro.generic.GenericRecordBuilder;
+import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.io.Text;
 
-public class AvroRowEncoderIterator extends RowBuilderIterator {
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+/**
+ * Backend iterator for Accumulo Connector for Apache Spark.
+ * 
+ * Features:
+ * 
+ * <ul>
+ * <li>Combines selected key/value pairs into a single AVRO encoded row</li>
+ * <li>Output schema convention: column family are top-level keys, column qualifiers are nested
+ * record fields.</li>
+ * <li>Row-level filtering through user-supplied Java Unified Expression Language (JUEL)-encoded
+ * filter constraint.</li>
+ * <li>Compute columns based on other row-level columns.</li>
+ * <li>Schema less serialization performed to safe bandwidth.</li>
+ * </ul>
+ */
+public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>, OptionDescriber {
+  /**
+   * Key for the schema input option.
+   */
+  public static final String SCHEMA = "schema";
+
+  /**
+   * Key for filter option.
+   */
   public static final String FILTER = "filter";
+
+  /**
+   * Key for mleap bundle option.
+   */
   public static final String MLEAP_BUNDLE = "mleap.bundle";
 
-  // root schema holding fields for each column family
-  private Schema schema;
+  /**
+   * A custom and fast implementation of an Avro record.
+   */
+  private AvroFastRecord rootRecord;
 
-  private AvroRowRecordBuilder recordBuilder;
-
+  /**
+   * The final serializer creating the binary array.
+   */
   private AvroRowSerializer serializer;
 
-  private AvroRowComputedColumns computedColumns;
+  /**
+   * List of processors executed when the row was build up.
+   */
+  private List<AvroRowConsumer> processors;
 
-  private AvroRowFilter filter;
+  /**
+   * Fast lookup table from "column family" to "column qualifier" to "type". If it's not in this
+   * mapping we can skip the cell. Using this order as the cells are sorted by family, qualifier
+   */
+  protected Map<ByteSequence,Map<ByteSequence,RowBuilderCellConsumer>> cellToColumnMap;
 
-  private AvroRowMLeap mleap;
+  /**
+   * The source iterator;
+   */
+  protected SortedKeyValueIterator<Key,Value> sourceIter;
+
+  /**
+   * The current key.
+   */
+  private Key topKey = null;
+
+  /**
+   * The current value.
+   */
+  private Value topValue = null;
 
   @Override
-  protected void startRow(Text rowKey) throws IOException {
-    this.serializer.startRow();
+  public boolean validateOptions(Map<String,String> options) {
+    try {
+      new ObjectMapper().readValue(options.get(SCHEMA), RowBuilderField[].class);
 
-    this.recordBuilder.startRow();
-  }
-
-  @Override
-  protected void processCell(Key key, Value value, RowBuilderType type) throws IOException {
-    this.recordBuilder.processCell(key, value, type);
-  }
-
-  @Override
-  protected byte[] endRow(Text rowKey) throws IOException {
-    // finalize the GenericRecord
-    GenericRecordBuilder genericRecordBuilder = this.recordBuilder.endRow();
-
-    // compute expression based columns
-    Record record = this.computedColumns.endRow(rowKey, genericRecordBuilder);
-
-    // check if filter matches
-    if (this.filter.endRow(rowKey, record))
-      return null;
-
-    this.mleap.endRow(record);
-
-    // serialize
-    return this.serializer.endRow(record);
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
   }
 
   @Override
   public void init(SortedKeyValueIterator<Key,Value> source, Map<String,String> options,
       IteratorEnvironment env) throws IOException {
 
-    super.init(source, options, env);
+    this.sourceIter = source;
+
+    // build the lookup table for the cells we care for from the user-supplied JSON
+    RowBuilderField[] schemaFields =
+        new ObjectMapper().readValue(options.get(SCHEMA), RowBuilderField[].class);
+
+    // union( user-supplied fields + computed fields )
+    ArrayList<RowBuilderField> allFields = new ArrayList<>(Arrays.asList(schemaFields));
 
     // initialize compute columns (only definitions are initialized, need to wait
     // for schema)
-    this.computedColumns = new AvroRowComputedColumns(options);
-
-    // union( user-supplied fields + computed fields )
-    Collection<RowBuilderField> allFields = this.computedColumns.getComputedSchemaFields();
-    allFields.addAll(Arrays.asList(super.schemaFields));
+    AvroRowComputedColumns computedColumns = AvroRowComputedColumns.create(options);
+    if (computedColumns != null)
+      allFields.addAll(computedColumns.getComputedSchemaFields());
 
     // build the AVRO schema
-    this.schema = AvroSchemaBuilder.buildSchema(allFields);
+    Schema schema = AvroSchemaBuilder.buildSchema(allFields);
 
     // initialize the record builder
-    this.recordBuilder = new AvroRowRecordBuilder(this.schema);
+    this.rootRecord = new AvroFastRecord(schema);
 
-    // finalize the computed columns
-    this.computedColumns.initialize(this.schema, this.schemaFields);
+    // provide fast lookup map
+    this.cellToColumnMap = AvroFastRecord.createCellToFieldMap(rootRecord);
+
+    // feed the final schema bag
+    if (computedColumns != null)
+      computedColumns.initialize(schema);
 
     // setup binary serializer
     this.serializer = new AvroRowSerializer(schema);
 
-    // setup JUEL based filter
-    this.filter = new AvroRowFilter(schema, schemaFields, options.get(FILTER));
-
     // setup ML bundle
-    this.mleap = new AvroRowMLeap(schema, options.get(MLEAP_BUNDLE));
+    // this.mleap = new AvroRowMLeap(schema, options.get(MLEAP_BUNDLE));
+
+    this.processors = Arrays.stream(new AvroRowConsumer[] {
+        // compute additional columns
+        computedColumns,
+        // filter row
+        AvroRowFilter.create(schema, options.get(FILTER))})
+        // compute & filter are optional depending on input
+        .filter(x -> x != null).collect(Collectors.toList());
+  }
+
+  @Override
+  public IteratorOptions describeOptions() {
+    IteratorOptions io = new IteratorOptions("AvroRowEncodingIterator",
+        "AvroRowEncodingIterator assists in building rows based on user-supplied schema.", null,
+        null);
+
+    io.addNamedOption("schema", "Schema selected cells of interest along with type information.");
+
+    return io;
+  }
+
+  private void encodeRow() throws IOException {
+    byte[] rowValue = null;
+    Text currentRow;
+
+    do {
+      boolean foundConsumer = false;
+      do {
+        // no more input row?
+        if (!sourceIter.hasTop())
+          return;
+
+        currentRow = new Text(sourceIter.getTopKey().getRow());
+
+        ByteSequence currentFamily = null;
+        Map<ByteSequence,RowBuilderCellConsumer> currentQualifierMapping = null;
+
+        // start of new record
+        this.rootRecord.clear();
+
+        while (sourceIter.hasTop() && sourceIter.getTopKey().getRow().equals(currentRow)) {
+          Key sourceTopKey = sourceIter.getTopKey();
+
+          // different column family?
+          if (currentFamily == null || !sourceTopKey.getColumnFamilyData().equals(currentFamily)) {
+            currentFamily = sourceTopKey.getColumnFamilyData();
+            currentQualifierMapping = cellToColumnMap.get(currentFamily);
+          }
+
+          // skip if no mapping found
+          if (currentQualifierMapping != null) {
+
+            RowBuilderCellConsumer consumer =
+                currentQualifierMapping.get(sourceTopKey.getColumnQualifierData());
+            if (consumer != null) {
+              foundConsumer = true;
+
+              Value value = sourceIter.getTopValue();
+
+              consumer.consume(sourceTopKey, value);
+            }
+          }
+
+          sourceIter.next();
+        }
+      } while (!foundConsumer); // skip rows until we found a single feature
+
+      // produce final row
+      rowValue = endRow(currentRow);
+      // skip if null
+    } while (rowValue == null);
+
+    // null doesn't seem to be allowed for cf/cq...
+    topKey = new Key(currentRow, new Text("v"), new Text(""));
+    topValue = new Value(rowValue);
+  }
+
+  private byte[] endRow(Text rowKey) throws IOException {
+    // let's start the processing pipeline
+    IndexedRecord record = this.rootRecord;
+
+    for (AvroRowConsumer processor : this.processors) {
+      record = processor.consume(rowKey, record);
+
+      // stop early
+      if (record == null)
+        return null;
+    }
+
+    // serialize the record
+    return this.serializer.serialize(record);
+  }
+
+  @Override
+  public Key getTopKey() {
+    return topKey;
+  }
+
+  @Override
+  public Value getTopValue() {
+    return topValue;
+  }
+
+  @Override
+  public boolean hasTop() {
+    return topKey != null;
+  }
+
+  @Override
+  public void next() throws IOException {
+    topKey = null;
+    topValue = null;
+    encodeRow();
+  }
+
+  @Override
+  public void seek(Range range, Collection<ByteSequence> columnFamilies, boolean inclusive)
+      throws IOException {
+    topKey = null;
+    topValue = null;
+
+    // from RowEncodingIterator
+    Key sk = range.getStartKey();
+
+    if (sk != null && sk.getColumnFamilyData().length() == 0
+        && sk.getColumnQualifierData().length() == 0 && sk.getColumnVisibilityData().length() == 0
+        && sk.getTimestamp() == Long.MAX_VALUE && !range.isStartKeyInclusive()) {
+      // assuming that we are seeking using a key previously returned by this iterator
+      // therefore go to the next row
+      Key followingRowKey = sk.followingKey(PartialKey.ROW);
+      if (range.getEndKey() != null && followingRowKey.compareTo(range.getEndKey()) > 0)
+        return;
+
+      range = new Range(sk.followingKey(PartialKey.ROW), true, range.getEndKey(),
+          range.isEndKeyInclusive());
+    }
+
+    sourceIter.seek(range, columnFamilies, inclusive);
+    encodeRow();
+  }
+
+  @Override
+  public SortedKeyValueIterator<Key,Value> deepCopy(IteratorEnvironment env) {
+    AvroRowEncoderIterator copy = new AvroRowEncoderIterator();
+
+    copy.serializer = serializer;
+    copy.rootRecord = new AvroFastRecord(copy.rootRecord.getSchema());
+    copy.cellToColumnMap = AvroFastRecord.createCellToFieldMap(copy.rootRecord);
+    copy.processors = copy.processors;
+    copy.sourceIter = sourceIter.deepCopy(env);
+
+    return copy;
   }
 }

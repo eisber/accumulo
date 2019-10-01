@@ -17,34 +17,60 @@
 
 package org.apache.accumulo.core.iterators.user.avro.juel;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import javax.el.ValueExpression;
 import javax.el.VariableMapper;
 
-import org.apache.accumulo.core.iterators.user.avro.RowBuilderField;
 import org.apache.accumulo.core.iterators.user.avro.juel.expressions.AvroObjectExpression;
 import org.apache.accumulo.core.iterators.user.avro.juel.expressions.AvroVariableExpression;
 import org.apache.accumulo.core.iterators.user.avro.juel.expressions.RowKeyVariableExpression;
+import org.apache.accumulo.core.iterators.user.avro.record.AvroSchemaBuilder;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderType;
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
+import org.apache.avro.Schema.Type;
 
+/**
+ * Resolve JUEL variables against Avro schema.
+ */
 public class AvroVariableMapper extends VariableMapper {
 
   private static final String ROWKEY_VARIABLE_NAME = "rowKey";
 
   private Schema schema;
-  private RowBuilderField[] schemaFields;
 
-  public AvroVariableMapper(Schema schema, RowBuilderField[] schemaFields) {
+  /**
+   * fast lookup for variable names modelled by Avro aliases.
+   */
+  private Map<String,AvroVariableExpression> aliasMap;
+
+  public AvroVariableMapper(Schema schema) {
     this.schema = schema;
-    this.schemaFields = schemaFields;
-  }
 
-  private RowBuilderField findRowBuilderFieldByVariable(String variable) {
-    for (RowBuilderField smf : schemaFields)
-      if (variable.equals(smf.getFilterVariableName()))
-        return smf;
+    // build alias to VariableExpression map
+    this.aliasMap = new HashMap<>();
+    for (Field field : schema.getFields()) {
 
-    return null;
+      if (field.schema().getType() == Type.RECORD) {
+        for (Field nestedField : field.schema().getFields()) {
+          // find the corresponding java class
+          Class<?> nestedFieldClass = RowBuilderType
+              .valueOf(nestedField.getProp(AvroSchemaBuilder.ROWBUILDERTYPE_PROP)).getJavaClass();
+
+          for (String alias : nestedField.aliases())
+            this.aliasMap.put(alias,
+                new AvroVariableExpression(nestedFieldClass, field.pos(), nestedField.pos()));
+        }
+      } else {
+        // find the corresponding java class
+        Class<?> fieldClass = RowBuilderType
+            .valueOf(field.getProp(AvroSchemaBuilder.ROWBUILDERTYPE_PROP)).getJavaClass();
+        for (String alias : field.aliases())
+          this.aliasMap.put(alias, new AvroVariableExpression(fieldClass, field.pos()));
+      }
+    }
   }
 
   /**
@@ -57,20 +83,10 @@ public class AvroVariableMapper extends VariableMapper {
       return RowKeyVariableExpression.INSTANCE;
 
     // check if this is a statically resolved variable (e.g. v2 = cf1.cq1)
-    RowBuilderField field = findRowBuilderFieldByVariable(variable);
-    if (field == null)
-      return new AvroObjectExpression(schema.getField(variable));
+    AvroVariableExpression expr = this.aliasMap.get(variable);
 
-    // resolve using variable expressions.
-    Field columnFamilyField = schema.getField(field.getColumnFamily());
-
-    if (field.getColumnQualifier() == null || field.getColumnQualifier().isEmpty())
-      return new AvroVariableExpression(field.getRowBuilderType().getJavaClass(),
-          columnFamilyField.pos());
-
-    Field columnQualifierField = columnFamilyField.schema().getField(field.getColumnQualifier());
-    return new AvroVariableExpression(field.getRowBuilderType().getJavaClass(),
-        columnFamilyField.pos(), columnQualifierField.pos());
+    // otherwise default to dynamic lookup
+    return expr != null ? expr : new AvroObjectExpression(this.schema.getField(variable));
   }
 
   @Override

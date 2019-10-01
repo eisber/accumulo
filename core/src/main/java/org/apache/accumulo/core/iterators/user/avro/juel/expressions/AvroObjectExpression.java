@@ -24,6 +24,7 @@ import javax.el.ValueExpression;
 import org.apache.accumulo.core.iterators.user.avro.juel.AvroELContext;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.IndexedRecord;
 
 /**
  * JUEL VariableExpression resolving to a nested record.
@@ -50,9 +51,9 @@ public class AvroObjectExpression extends ValueExpression {
 
   @Override
   public Object getValue(ELContext context) {
-    Record record = ((AvroELContext) context).getAvroRecord();
+    IndexedRecord record = ((AvroELContext) context).getAvroRecord();
 
-    return (Record) record.get(this.field.pos());
+    return (IndexedRecord) record.get(this.field.pos());
   }
 
   @Override

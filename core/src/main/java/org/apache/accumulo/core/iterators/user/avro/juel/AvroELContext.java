@@ -22,9 +22,8 @@ import javax.el.ELResolver;
 import javax.el.FunctionMapper;
 import javax.el.VariableMapper;
 
-import org.apache.accumulo.core.iterators.user.avro.RowBuilderField;
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.io.Text;
 
 /**
@@ -33,13 +32,13 @@ import org.apache.hadoop.io.Text;
  */
 public class AvroELContext extends ELContext {
 
-  private Record avroRecord;
+  private IndexedRecord avroRecord;
   private Text rowKey;
   private VariableMapper variableMapper;
   private ELResolver resolver;
 
-  public AvroELContext(Schema schema, RowBuilderField[] schemaFields) {
-    variableMapper = new AvroVariableMapper(schema, schemaFields);
+  public AvroELContext(Schema schema) {
+    variableMapper = new AvroVariableMapper(schema);
     resolver = new AvroResolver();
   }
 
@@ -58,7 +57,7 @@ public class AvroELContext extends ELContext {
     return variableMapper;
   }
 
-  public Record getAvroRecord() {
+  public IndexedRecord getAvroRecord() {
     return avroRecord;
   }
 
@@ -66,7 +65,7 @@ public class AvroELContext extends ELContext {
     return rowKey;
   }
 
-  public void setCurrent(Text rowKey, Record avroRecord) {
+  public void setCurrent(Text rowKey, IndexedRecord avroRecord) {
     this.rowKey = rowKey;
     this.avroRecord = avroRecord;
   }

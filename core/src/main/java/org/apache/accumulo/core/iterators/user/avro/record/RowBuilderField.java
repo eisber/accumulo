@@ -15,11 +15,14 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.record;
 
 import com.fasterxml.jackson.annotation.JsonGetter;
 import com.fasterxml.jackson.annotation.JsonSetter;
 
+/**
+ * POJO for the user-supplied schema fields.
+ */
 public class RowBuilderField {
   private String columnFamily;
   private String columnQualifier;

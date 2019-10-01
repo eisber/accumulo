@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.record;
 
 import java.util.Date;
 

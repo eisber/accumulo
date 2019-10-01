@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.processors;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -24,7 +25,8 @@ import java.util.List;
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.Schema.Type;
-import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.IndexedRecord;
+import org.apache.hadoop.io.Text;
 
 import ml.combust.mleap.avro.SchemaConverter;
 import ml.combust.mleap.core.types.StructField;
@@ -35,7 +37,10 @@ import ml.combust.mleap.runtime.frame.Row;
 import scala.collection.JavaConverters;
 import scala.collection.mutable.WrappedArray;
 
-public class AvroRowMLeap {
+/**
+ * Maps AVRO Generic row to MLeap data frame enabling server-side inference.
+ */
+public class AvroRowMLeap implements AvroRowConsumer {
   private DefaultLeapFrame mleapDataFrame;
   private Object[] mleapValues;
   private Field[] mleapAvroFields;
@@ -43,8 +48,10 @@ public class AvroRowMLeap {
 
   public AvroRowMLeap(Schema schema, String mleapBundle) {
 
-    // TODO: parse mleapBundle, check for null
+    if (mleapBundle == null || mleapBundle.trim().length() == 0)
+      return;
 
+    // mapping the Avro schema to MLeap schema
     List<Field> avroFields = new ArrayList<>();
 
     List<StructField> mleapFields = new ArrayList<>();
@@ -66,7 +73,8 @@ public class AvroRowMLeap {
         .asScala().toSeq());
   }
 
-  public void endRow(Record record) {
+  @Override
+  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
     // surface data to MLeap dataframe
     for (int i = 0; i < this.mleapAvroFields.length; i++)
       this.mleapValues[i] = record.get(this.mleapAvroFields[i].pos());
@@ -74,5 +82,7 @@ public class AvroRowMLeap {
     // TODO: execute
     mleapDataFrame.printSchema();
     mleapDataFrame.show(System.out);
+
+    return record;
   }
 }

@@ -15,17 +15,28 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.processors;
+
+import java.io.IOException;
 
 import javax.el.ExpressionFactory;
 import javax.el.ValueExpression;
 
 import org.apache.accumulo.core.iterators.user.avro.juel.AvroELContext;
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.io.Text;
 
-public class AvroRowFilter {
+/**
+ * Evaluates the user-supplied filter (JUEL syntax) against the constructed AVRO record.
+ * 
+ * @implNote filter operates on AVRO Record object, not on the serialized version.
+ */
+public class AvroRowFilter implements AvroRowConsumer {
+
+  public static AvroRowFilter create(Schema schema, String filter) {
+    return filter == null || filter.trim().length() == 0 ? null : new AvroRowFilter(schema, filter);
+  }
 
   /**
    * JUEL expression context exposing AVRO GenericRecord
@@ -37,22 +48,19 @@ public class AvroRowFilter {
    */
   private ValueExpression filterExpression;
 
-  public AvroRowFilter(Schema schema, RowBuilderField[] schemaFields, String filter) {
-    this.expressionContext = new AvroELContext(schema, schemaFields);
+  private AvroRowFilter(Schema schema, String filter) {
+    this.expressionContext = new AvroELContext(schema);
 
     ExpressionFactory factory = ExpressionFactory.newInstance();
 
     this.filterExpression = factory.createValueExpression(expressionContext, filter, boolean.class);
   }
 
-  public boolean endRow(Text rowKey, Record record) {
-    if (this.filterExpression != null) {
-      this.expressionContext.setCurrent(rowKey, record);
+  @Override
+  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
+    // link AVRO record with JUEL expression context
+    this.expressionContext.setCurrent(rowKey, record);
 
-      if (!(boolean) filterExpression.getValue(this.expressionContext))
-        return true;
-    }
-
-    return false;
+    return (boolean) filterExpression.getValue(this.expressionContext) ? record : null;
   }
 }

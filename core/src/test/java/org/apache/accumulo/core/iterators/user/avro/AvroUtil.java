@@ -17,40 +17,24 @@
 
 package org.apache.accumulo.core.iterators.user.avro;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Collection;
+import java.util.HashSet;
 
+import org.apache.accumulo.core.data.ByteSequence;
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData.Record;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.io.BinaryEncoder;
-import org.apache.avro.io.DatumWriter;
-import org.apache.avro.io.EncoderFactory;
-import org.apache.avro.specific.SpecificDatumWriter;
+import org.apache.avro.io.BinaryDecoder;
+import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.specific.SpecificDatumReader;
 
-public class AvroRowSerializer {
-  // avro writer infra
-  private ByteArrayOutputStream binaryBuffer = new ByteArrayOutputStream();
-  private DatumWriter<GenericRecord> writer;
-  private BinaryEncoder encoder;
+public class AvroUtil {
+  public static final Collection<ByteSequence> EMPTY_SET = new HashSet<>();
 
-  public AvroRowSerializer(Schema schema) {
+  public static GenericRecord deserialize(byte[] data, Schema schema) throws IOException {
+    SpecificDatumReader<GenericRecord> reader = new SpecificDatumReader<GenericRecord>(schema);
+    BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(data, null);
 
-    this.writer = new SpecificDatumWriter<>(schema);
-    this.encoder = EncoderFactory.get().binaryEncoder(binaryBuffer, null);
-  }
-
-  public void startRow() {
-    binaryBuffer.reset();
-  }
-
-  public byte[] endRow(Record record) throws IOException {
-    // serialize the record
-    this.writer.write(record, encoder);
-    this.encoder.flush();
-    this.binaryBuffer.flush();
-
-    return this.binaryBuffer.toByteArray();
-
+    return reader.read(null, decoder);
   }
 }

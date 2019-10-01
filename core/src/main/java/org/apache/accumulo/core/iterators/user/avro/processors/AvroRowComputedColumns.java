@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-package org.apache.accumulo.core.iterators.user.avro;
+package org.apache.accumulo.core.iterators.user.avro.processors;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -27,10 +28,11 @@ import javax.el.ExpressionFactory;
 import javax.el.ValueExpression;
 
 import org.apache.accumulo.core.iterators.user.avro.juel.AvroELContext;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderField;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderType;
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
-import org.apache.avro.generic.GenericData.Record;
-import org.apache.avro.generic.GenericRecordBuilder;
+import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.io.Text;
 
 /**
@@ -40,7 +42,7 @@ import org.apache.hadoop.io.Text;
  * columns we have, return to the caller so we can setup the AVRO schema and then continue the setup
  * here.
  */
-public class AvroRowComputedColumns {
+public class AvroRowComputedColumns implements AvroRowConsumer {
   public static final String COLUMN_PREFIX = "column.";
 
   /**
@@ -62,7 +64,7 @@ public class AvroRowComputedColumns {
    * Just the definition of the expression. Need to collect them all first so the AVRO schema can be
    * build.
    */
-  class ExpressionColumnDefinition {
+  static class ExpressionColumnDefinition {
     private RowBuilderField schemaField;
 
     private String expression;
@@ -87,23 +89,27 @@ public class AvroRowComputedColumns {
   class ExpressionColumn {
     private ValueExpression columnExpression;
 
-    private Field field;
+    private int pos;
 
-    public ExpressionColumn(ValueExpression columnExpression, Field field) {
+    public ExpressionColumn(ValueExpression columnExpression, int pos) {
       this.columnExpression = columnExpression;
-      this.field = field;
+      this.pos = pos;
     }
 
-    public void populateField(GenericRecordBuilder recordBuilder) {
+    public void setFieldValue(IndexedRecord record) {
       Object value = this.columnExpression.getValue(AvroRowComputedColumns.this.expressionContext);
-      recordBuilder.set(this.field, value);
+      record.put(this.pos, value);
     }
   }
 
-  public AvroRowComputedColumns(Map<String,String> options) {
+  /**
+   * Factory method creating the row processor if valid options are supplied or null if none are
+   * found.
+   */
+  public static AvroRowComputedColumns create(Map<String,String> options) {
     // expression setup
     // options: column.<name>.<type>, JUEL expression
-    this.expressionColumns = new ArrayList<>();
+    List<ExpressionColumnDefinition> expressionColumnDefinitions = new ArrayList<>();
 
     for (Map.Entry<String,String> entry : options.entrySet()) {
       if (!entry.getKey().startsWith(COLUMN_PREFIX))
@@ -115,12 +121,19 @@ public class AvroRowComputedColumns {
             "Unable to parse column specification. column.<name>.<type>: " + entry.getKey());
 
       String column = arr[1];
-      String type = arr[2];
+      String type = RowBuilderType.valueOfIgnoreCase(arr[2]).name();
       String expression = entry.getValue();
-      RowBuilderField schemaField = new RowBuilderField(column, null, type, null);
+      RowBuilderField schemaField = new RowBuilderField(column, null, type, column);
 
-      this.expressionColumnDefinitions.add(new ExpressionColumnDefinition(schemaField, expression));
+      expressionColumnDefinitions.add(new ExpressionColumnDefinition(schemaField, expression));
     }
+
+    return expressionColumnDefinitions.isEmpty() ? null
+        : new AvroRowComputedColumns(expressionColumnDefinitions);
+  }
+
+  private AvroRowComputedColumns(List<ExpressionColumnDefinition> expressionColumnDefinitions) {
+    this.expressionColumnDefinitions = expressionColumnDefinitions;
   }
 
   /**
@@ -140,8 +153,8 @@ public class AvroRowComputedColumns {
    * @param schemaFields
    *          the user supplied schema.
    */
-  public void initialize(Schema schema, RowBuilderField[] schemaFields) {
-    this.expressionContext = new AvroELContext(schema, schemaFields);
+  public void initialize(Schema schema) {
+    this.expressionContext = new AvroELContext(schema);
 
     ExpressionFactory factory = ExpressionFactory.newInstance();
 
@@ -152,32 +165,18 @@ public class AvroRowComputedColumns {
       ValueExpression columnExpression = factory.createValueExpression(expressionContext,
           expr.getExpression(), type.getJavaClass());
 
-      return new ExpressionColumn(columnExpression, field);
+      return new ExpressionColumn(columnExpression, field.pos());
     }).collect(Collectors.toList());
   }
 
-  /**
-   * Compute each expression and assign the output to the corresponding field.
-   * 
-   * @param rowKey
-   *          the row key.
-   * @param recordBuilder
-   *          the recordBuilder to be filled.
-   * @return the AVRO record contain the input data and the additionally compute fields.
-   */
-  public Record endRow(Text rowKey, GenericRecordBuilder recordBuilder) {
+  @Override
+  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
+    this.expressionContext.setCurrent(rowKey, record);
 
-    if (!this.expressionColumns.isEmpty()) {
-      // need to build it now, so that we can access the fields from within the
-      // expressions
-      Record record = recordBuilder.build();
-      this.expressionContext.setCurrent(rowKey, record);
+    // compute each exporession
+    for (ExpressionColumn expr : this.expressionColumns)
+      expr.setFieldValue(record);
 
-      // compute each exporession
-      for (ExpressionColumn expr : this.expressionColumns)
-        expr.populateField(recordBuilder);
-    }
-
-    return recordBuilder.build();
+    return record;
   }
 }

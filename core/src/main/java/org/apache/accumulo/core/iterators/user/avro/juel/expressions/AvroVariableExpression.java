@@ -24,13 +24,16 @@ import javax.el.ELException;
 import javax.el.ValueExpression;
 
 import org.apache.accumulo.core.iterators.user.avro.juel.AvroELContext;
-import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.IndexedRecord;
 
+/**
+ * Expose Avro top-level record fields as JUEL ValueExpression
+ */
 public class AvroVariableExpression extends ValueExpression {
-
   private static final long serialVersionUID = 1L;
 
   private Class<?> type;
+  // indices to walk through nested avro records
   private int[] fieldPositions;
 
   public AvroVariableExpression(Class<?> type, int... fieldPositions) {
@@ -50,11 +53,11 @@ public class AvroVariableExpression extends ValueExpression {
 
   @Override
   public Object getValue(ELContext context) {
-    Record record = ((AvroELContext) context).getAvroRecord();
+    IndexedRecord record = ((AvroELContext) context).getAvroRecord();
 
     // supported nested records (e.g. column family/column qualifier)
     for (int i = 0; i < fieldPositions.length - 1; i++)
-      record = (Record) record.get(fieldPositions[i]);
+      record = (IndexedRecord) record.get(fieldPositions[i]);
 
     return record.get(fieldPositions[fieldPositions.length - 1]);
   }

@@ -27,7 +27,8 @@ import javax.el.ELResolver;
 
 import org.apache.avro.Schema.Field;
 import org.apache.avro.Schema.Type;
-import org.apache.avro.generic.GenericData.Record;
+import org.apache.avro.generic.GenericContainer;
+import org.apache.avro.generic.IndexedRecord;
 
 /**
  * Resolves variables and properties from AVRO GenericRecord.
@@ -63,16 +64,17 @@ public class AvroResolver extends ELResolver {
 
   @Override
   public Class<?> getType(ELContext context, Object base, Object property) {
-    return avroTypeToJavaType(((Record) base).getSchema().getField((String) property));
+    return avroTypeToJavaType(((GenericContainer) base).getSchema().getField((String) property));
   }
 
   @Override
   public Object getValue(ELContext context, Object base, Object property) {
-    Record record = (Record) base;
+    IndexedRecord record = (IndexedRecord) base;
 
     context.setPropertyResolved(true);
 
-    return record.get((String) property);
+    // lookup field
+    return record.get(record.getSchema().getField((String) property).pos());
   }
 
   @Override
@@ -88,28 +90,50 @@ public class AvroResolver extends ELResolver {
   @Override
   public Object invoke(ELContext context, Object base, Object method, Class<?>[] paramTypes,
       Object[] params) {
-    if (base.getClass().equals(String.class) && params.length == 1) {
+    if (params.length == 1) {
+      if (base instanceof String) {
+        String baseStr = (String) base;
+        String paramStr = (String) params[0];
 
-      String baseStr = (String) base;
-      String paramStr = (String) params[0];
+        // Spark methods available for pushdown
+        if (method.equals("endsWith")) {
+          context.setPropertyResolved(true);
+          return baseStr.endsWith(paramStr);
+        }
 
-      // Spark methods available for pushdown
-      if (method.equals("endsWith")) {
-        context.setPropertyResolved(true);
-        return baseStr.endsWith(paramStr);
+        if (method.equals("startsWith")) {
+          context.setPropertyResolved(true);
+          return baseStr.startsWith(paramStr);
+        }
+
+        if (method.equals("contains")) {
+          context.setPropertyResolved(true);
+          return baseStr.contains(paramStr);
+        }
+      } else if (base instanceof AvroUtf8Wrapper) {
+        AvroUtf8Wrapper baseStr = (AvroUtf8Wrapper) base;
+        String paramStr = (String) params[0];
+
+        // Spark methods available for pushdown
+        if (method.equals("endsWith")) {
+          context.setPropertyResolved(true);
+          return baseStr.endsWith(paramStr);
+        }
+
+        if (method.equals("startsWith")) {
+          context.setPropertyResolved(true);
+          return baseStr.startsWith(paramStr);
+        }
+
+        if (method.equals("contains")) {
+          context.setPropertyResolved(true);
+          return baseStr.contains(paramStr);
+        }
       }
-
-      if (method.equals("startsWith")) {
-        context.setPropertyResolved(true);
-        return baseStr.startsWith(paramStr);
-      }
-
-      if (method.equals("contains")) {
-        context.setPropertyResolved(true);
-        return baseStr.contains(paramStr);
-      }
-
     } else if (method.equals("in")) {
+      if (base instanceof AvroUtf8Wrapper)
+        base = ((AvroUtf8Wrapper) base).getString();
+
       context.setPropertyResolved(true);
       return Arrays.binarySearch(params, base) >= 0;
     }
