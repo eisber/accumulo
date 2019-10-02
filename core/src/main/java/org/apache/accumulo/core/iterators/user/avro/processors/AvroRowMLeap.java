@@ -17,23 +17,40 @@
 
 package org.apache.accumulo.core.iterators.user.avro.processors;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderField;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderType;
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.Schema.Type;
 import org.apache.avro.generic.IndexedRecord;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.io.Text;
 
+import com.google.common.io.Files;
+
 import ml.combust.mleap.avro.SchemaConverter;
+import ml.combust.mleap.core.types.BasicType;
+import ml.combust.mleap.core.types.DataType;
+import ml.combust.mleap.core.types.ScalarType;
 import ml.combust.mleap.core.types.StructField;
 import ml.combust.mleap.core.types.StructType;
+import ml.combust.mleap.runtime.MleapContext;
 import ml.combust.mleap.runtime.frame.ArrayRow;
 import ml.combust.mleap.runtime.frame.DefaultLeapFrame;
 import ml.combust.mleap.runtime.frame.Row;
+import ml.combust.mleap.runtime.frame.Transformer;
+import ml.combust.mleap.runtime.javadsl.BundleBuilder;
+import ml.combust.mleap.runtime.javadsl.ContextBuilder;
 import scala.collection.JavaConverters;
 import scala.collection.mutable.WrappedArray;
 
@@ -41,15 +58,142 @@ import scala.collection.mutable.WrappedArray;
  * Maps AVRO Generic row to MLeap data frame enabling server-side inference.
  */
 public class AvroRowMLeap implements AvroRowConsumer {
+  /**
+   * Key for mleap bundle option.
+   */
+  public static final String MLEAP_BUNDLE = "mleap.bundle";
+
+  public static AvroRowMLeap create(Map<String,String> options) throws IOException {
+    String mleapBundleBase64 = options.get(MLEAP_BUNDLE);
+
+    if (StringUtils.isEmpty(mleapBundleBase64))
+      return null;
+
+    byte[] mleapBundle = Base64.getDecoder().decode(mleapBundleBase64);
+
+    // alternatively use https://github.com/marschall/memoryfilesystem
+
+    File tempFile = File.createTempFile("mleap", ".zip");
+    tempFile.deleteOnExit(); // just in case something goes wrong
+
+    // a bit unfortunate... maybe we can use HDFS references too?
+    Files.write(mleapBundle, tempFile);
+
+    return new AvroRowMLeap(tempFile);
+  }
+
+  /**
+   * Definition of the output fields.
+   */
+  private class OutputField {
+    private RowBuilderField field;
+
+    private int outputFieldIndex;
+
+    private int avroFieldIndex;
+
+    public OutputField(RowBuilderField field, int outputFieldIndex) {
+      this.field = field;
+      this.outputFieldIndex = outputFieldIndex;
+    }
+
+    public RowBuilderField getField() {
+      return field;
+    }
+
+    public int getOutputFieldIndex() {
+      return outputFieldIndex;
+    }
+
+    public void setOutputFieldIndex(int outputFieldIndex) {
+      this.outputFieldIndex = outputFieldIndex;
+    }
+
+    public void setAvroFieldIndex(int avroFieldIndex) {
+      this.avroFieldIndex = avroFieldIndex;
+    }
+
+    public int getAvroFieldIndex() {
+      return avroFieldIndex;
+    }
+  }
+
+  private List<OutputField> outputFields;
+  private Schema schema;
+  private File modelFile;
   private DefaultLeapFrame mleapDataFrame;
   private Object[] mleapValues;
   private Field[] mleapAvroFields;
   private StructType mleapSchema;
+  private Transformer transformer;
 
-  public AvroRowMLeap(Schema schema, String mleapBundle) {
+  private AvroRowMLeap(File modelFile) {
+    this.modelFile = modelFile;
 
-    if (mleapBundle == null || mleapBundle.trim().length() == 0)
-      return;
+    // ml.bundle.hdfs.HadoopBundleFileSystem
+    MleapContext mleapContext = new ContextBuilder().createMleapContext();
+    this.transformer = new BundleBuilder().load(modelFile, mleapContext).root();
+
+    // convert the output schema and remember the field indices
+    StructType outputSchema = this.transformer.outputSchema();
+    this.outputFields =
+        JavaConverters.seqAsJavaListConverter(outputSchema.fields()).asJava().stream()
+            // main loop
+            .map(field -> {
+              DataType dt = field.dataType();
+              String name = field.name();
+
+              int idx = (int) outputSchema.indexOf(name).get();
+
+              if (!(dt instanceof ScalarType))
+                return null;
+
+              ScalarType scalarType = (ScalarType) dt;
+              if (BasicType.Boolean$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Boolean.toString(), name), idx);
+
+              if (BasicType.Double$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Double.toString(), name), idx);
+
+              if (BasicType.Float$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Float.toString(), name), idx);
+
+              if (BasicType.Int$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Integer.toString(), name), idx);
+
+              if (BasicType.Short$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Integer.toString(), name), idx);
+
+              if (BasicType.Long$.MODULE$.equals(scalarType.base()))
+                return new OutputField(
+                    new RowBuilderField(name, null, RowBuilderType.Long.toString(), name), idx);
+
+              return null;
+            }).filter(f -> f != null).collect(Collectors.toList());
+  }
+
+  @Override
+  public AvroRowMLeap clone() {
+    AvroRowMLeap copy = new AvroRowMLeap(this.modelFile);
+
+    copy.initialize(schema);
+
+    return copy;
+  }
+
+  @Override
+  public Collection<RowBuilderField> getSchemaFields() {
+    return this.outputFields.stream().map(OutputField::getField).collect(Collectors.toList());
+  }
+
+  @Override
+  public void initialize(Schema schema) {
+    this.schema = schema;
 
     // mapping the Avro schema to MLeap schema
     List<Field> avroFields = new ArrayList<>();
@@ -57,6 +201,11 @@ public class AvroRowMLeap implements AvroRowConsumer {
     List<StructField> mleapFields = new ArrayList<>();
     for (Field field : schema.getFields()) {
       if (field.schema().getType() == Type.RECORD)
+        continue;
+
+      // make sure we don't have duplicate fields
+      if (this.outputFields.stream()
+          .anyMatch(f -> f.getField().getColumnFamily().equals(field.name())))
         continue;
 
       avroFields.add(field);
@@ -71,18 +220,42 @@ public class AvroRowMLeap implements AvroRowConsumer {
         .asScalaIteratorConverter(
             Arrays.stream(new Row[] {new ArrayRow(WrappedArray.make(this.mleapValues))}).iterator())
         .asScala().toSeq());
+
+    for (OutputField field : this.outputFields) {
+      // correct output index by the number of fields we input
+      field.setOutputFieldIndex(field.getOutputFieldIndex() + this.mleapAvroFields.length);
+      // link mleap dataframe field index with avro field index
+      field.setAvroFieldIndex(schema.getField(field.getField().getColumnFamily()).pos());
+    }
   }
 
   @Override
-  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
+  public boolean consume(Text rowKey, IndexedRecord record) throws IOException {
     // surface data to MLeap dataframe
     for (int i = 0; i < this.mleapAvroFields.length; i++)
       this.mleapValues[i] = record.get(this.mleapAvroFields[i].pos());
 
-    // TODO: execute
-    mleapDataFrame.printSchema();
-    mleapDataFrame.show(System.out);
+    // Helpful when debugging
+    // this.mleapDataFrame.printSchema();
+    // this.mleapDataFrame.show(System.out);
 
-    return record;
+    // overcome
+    // https://stackoverflow.com/questions/30372211/why-does-this-compile-under-java-7-but-not-under-java-8
+    // maybe this can be cached and computation re-triggered?
+    DefaultLeapFrame resultDataFrame = this.transformer.transform(this.mleapDataFrame).get();
+
+    // execute ML model
+    scala.collection.Iterator<Row> iter =
+        ((scala.collection.Iterable<Row>) resultDataFrame.collect()).iterator();
+    Row row = iter.next();
+
+    // Helpful when debugging
+    // resultDataFrame.show(System.out);
+
+    // copy mleap output to avro record
+    for (OutputField field : this.outputFields)
+      record.put(field.getAvroFieldIndex(), row.get(field.getOutputFieldIndex()));
+
+    return true;
   }
 }

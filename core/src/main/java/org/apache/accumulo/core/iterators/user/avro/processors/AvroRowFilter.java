@@ -18,13 +18,18 @@
 package org.apache.accumulo.core.iterators.user.avro.processors;
 
 import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
 
 import javax.el.ExpressionFactory;
 import javax.el.ValueExpression;
 
 import org.apache.accumulo.core.iterators.user.avro.juel.AvroELContext;
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderField;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.IndexedRecord;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.io.Text;
 
 /**
@@ -33,10 +38,20 @@ import org.apache.hadoop.io.Text;
  * @implNote filter operates on AVRO Record object, not on the serialized version.
  */
 public class AvroRowFilter implements AvroRowConsumer {
-
-  public static AvroRowFilter create(Schema schema, String filter) {
-    return filter == null || filter.trim().length() == 0 ? null : new AvroRowFilter(schema, filter);
+  public static AvroRowFilter create(Map<String,String> options, String optionKey) {
+    String filter = options.get(optionKey);
+    return StringUtils.isEmpty(filter) ? null : new AvroRowFilter(filter);
   }
+
+  /**
+   * Required for cloning.
+   */
+  private Schema schema;
+
+  /**
+   * Required for cloning.
+   */
+  private String filter;
 
   /**
    * JUEL expression context exposing AVRO GenericRecord
@@ -48,19 +63,39 @@ public class AvroRowFilter implements AvroRowConsumer {
    */
   private ValueExpression filterExpression;
 
-  private AvroRowFilter(Schema schema, String filter) {
+  private AvroRowFilter(String filter) {
+    this.filter = filter;
+  }
+
+  @Override
+  public boolean consume(Text rowKey, IndexedRecord record) throws IOException {
+    // link AVRO record with JUEL expression context
+    this.expressionContext.setCurrent(rowKey, record);
+
+    return (boolean) filterExpression.getValue(this.expressionContext);
+  }
+
+  @Override
+  public AvroRowConsumer clone() {
+    AvroRowFilter copy = new AvroRowFilter(this.filter);
+
+    copy.initialize(schema);
+
+    return copy;
+  }
+
+  @Override
+  public Collection<RowBuilderField> getSchemaFields() {
+    return Collections.<RowBuilderField>emptyList();
+  }
+
+  @Override
+  public void initialize(Schema schema) {
+    this.schema = schema;
     this.expressionContext = new AvroELContext(schema);
 
     ExpressionFactory factory = ExpressionFactory.newInstance();
 
     this.filterExpression = factory.createValueExpression(expressionContext, filter, boolean.class);
-  }
-
-  @Override
-  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
-    // link AVRO record with JUEL expression context
-    this.expressionContext.setCurrent(rowKey, record);
-
-    return (boolean) filterExpression.getValue(this.expressionContext) ? record : null;
   }
 }

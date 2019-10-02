@@ -46,6 +46,11 @@ public class AvroRowComputedColumns implements AvroRowConsumer {
   public static final String COLUMN_PREFIX = "column.";
 
   /**
+   * Required for copy.
+   */
+  private Schema schema;
+
+  /**
    * JUEL expression context exposing AVRO GenericRecord
    */
   private AvroELContext expressionContext;
@@ -140,7 +145,8 @@ public class AvroRowComputedColumns implements AvroRowConsumer {
    * 
    * @return a collection of RowBuilderFields based on the column expression definitions.
    */
-  public Collection<RowBuilderField> getComputedSchemaFields() {
+  @Override
+  public Collection<RowBuilderField> getSchemaFields() {
     return this.expressionColumnDefinitions.stream().map(ExpressionColumnDefinition::getSchemaField)
         .collect(Collectors.toList());
   }
@@ -153,7 +159,9 @@ public class AvroRowComputedColumns implements AvroRowConsumer {
    * @param schemaFields
    *          the user supplied schema.
    */
+  @Override
   public void initialize(Schema schema) {
+    this.schema = schema;
     this.expressionContext = new AvroELContext(schema);
 
     ExpressionFactory factory = ExpressionFactory.newInstance();
@@ -170,13 +178,22 @@ public class AvroRowComputedColumns implements AvroRowConsumer {
   }
 
   @Override
-  public IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException {
+  public boolean consume(Text rowKey, IndexedRecord record) throws IOException {
     this.expressionContext.setCurrent(rowKey, record);
 
     // compute each exporession
     for (ExpressionColumn expr : this.expressionColumns)
       expr.setFieldValue(record);
 
-    return record;
+    return true;
+  }
+
+  @Override
+  public AvroRowConsumer clone() {
+    AvroRowComputedColumns copy = new AvroRowComputedColumns(this.expressionColumnDefinitions);
+
+    copy.initialize(this.schema);
+
+    return copy;
   }
 }

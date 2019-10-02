@@ -18,7 +18,10 @@
 package org.apache.accumulo.core.iterators.user.avro.processors;
 
 import java.io.IOException;
+import java.util.Collection;
 
+import org.apache.accumulo.core.iterators.user.avro.record.RowBuilderField;
+import org.apache.avro.Schema;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.io.Text;
 
@@ -33,5 +36,27 @@ public interface AvroRowConsumer {
    * @return The same or a new processed record. Null if processing should be stopped (e.g. does not
    *         match a filter).
    */
-  IndexedRecord consume(Text rowKey, IndexedRecord record) throws IOException;
+  boolean consume(Text rowKey, IndexedRecord record) throws IOException;
+
+  /**
+   * Support copying of the object as the iterator needs to be copyable.
+   * 
+   * @return The cloned object.
+   */
+  AvroRowConsumer clone();
+
+  /**
+   * Any additional fields this consumer wants to populate.
+   * 
+   * @return additional fields added to the main schema.
+   */
+  Collection<RowBuilderField> getSchemaFields();
+
+  /**
+   * Final initialization of the consumer wants the entire schema was discovered.
+   * 
+   * @param schema
+   *          The final schema.
+   */
+  void initialize(Schema schema);
 }

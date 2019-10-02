@@ -36,6 +36,7 @@ import org.apache.accumulo.core.iterators.SortedKeyValueIterator;
 import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowComputedColumns;
 import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowConsumer;
 import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowFilter;
+import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowMLeap;
 import org.apache.accumulo.core.iterators.user.avro.processors.AvroRowSerializer;
 import org.apache.accumulo.core.iterators.user.avro.record.AvroFastRecord;
 import org.apache.accumulo.core.iterators.user.avro.record.AvroSchemaBuilder;
@@ -74,9 +75,9 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
   public static final String FILTER = "filter";
 
   /**
-   * Key for mleap bundle option.
+   * Key for filter option.
    */
-  public static final String MLEAP_BUNDLE = "mleap.bundle";
+  public static final String MLEAP_FILTER = "mleap.filter";
 
   /**
    * A custom and fast implementation of an Avro record.
@@ -140,9 +141,24 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
 
     // initialize compute columns (only definitions are initialized, need to wait
     // for schema)
-    AvroRowComputedColumns computedColumns = AvroRowComputedColumns.create(options);
-    if (computedColumns != null)
-      allFields.addAll(computedColumns.getComputedSchemaFields());
+    // if (computedColumns != null)
+    // allFields.addAll(computedColumns.getSchemaFields());
+
+    this.processors = Arrays.stream(new AvroRowConsumer[] {
+        // compute additional columns
+        AvroRowComputedColumns.create(options),
+        // filter row
+        AvroRowFilter.create(options, FILTER),
+        // apply ML model
+        AvroRowMLeap.create(options),
+        // filter post mleap
+        AvroRowFilter.create(options, MLEAP_FILTER)})
+        // compute & filter are optional depending on input
+        .filter(x -> x != null).collect(Collectors.toList());
+
+    // add all additional fields the consumers want to output
+    allFields.addAll(this.processors.stream().flatMap(f -> f.getSchemaFields().stream())
+        .collect(Collectors.toList()));
 
     // build the AVRO schema
     Schema schema = AvroSchemaBuilder.buildSchema(allFields);
@@ -153,23 +169,12 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
     // provide fast lookup map
     this.cellToColumnMap = AvroFastRecord.createCellToFieldMap(rootRecord);
 
-    // feed the final schema bag
-    if (computedColumns != null)
-      computedColumns.initialize(schema);
+    // feed the final schema back
+    for (AvroRowConsumer consumer : this.processors)
+      consumer.initialize(schema);
 
     // setup binary serializer
     this.serializer = new AvroRowSerializer(schema);
-
-    // setup ML bundle
-    // this.mleap = new AvroRowMLeap(schema, options.get(MLEAP_BUNDLE));
-
-    this.processors = Arrays.stream(new AvroRowConsumer[] {
-        // compute additional columns
-        computedColumns,
-        // filter row
-        AvroRowFilter.create(schema, options.get(FILTER))})
-        // compute & filter are optional depending on input
-        .filter(x -> x != null).collect(Collectors.toList());
   }
 
   @Override
@@ -178,7 +183,10 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
         "AvroRowEncodingIterator assists in building rows based on user-supplied schema.", null,
         null);
 
-    io.addNamedOption("schema", "Schema selected cells of interest along with type information.");
+    io.addNamedOption(SCHEMA, "Schema selected cells of interest along with type information.");
+    io.addNamedOption(FILTER, "JUEL encoded filter applied for each row.");
+    io.addNamedOption(MLEAP_FILTER, "JUEL encoded filter applied after executing Mleap model.");
+    io.addNamedOption(AvroRowMLeap.MLEAP_BUNDLE, "Base64 encoded Mleap bundle executed.");
 
     return io;
   }
@@ -244,15 +252,17 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
     IndexedRecord record = this.rootRecord;
 
     for (AvroRowConsumer processor : this.processors) {
-      record = processor.consume(rowKey, record);
-
-      // stop early
-      if (record == null)
+      if (!processor.consume(rowKey, record))
+        // stop early
         return null;
     }
 
     // serialize the record
     return this.serializer.serialize(record);
+  }
+
+  public Schema getSchema() {
+    return this.rootRecord.getSchema();
   }
 
   @Override
@@ -307,10 +317,11 @@ public class AvroRowEncoderIterator implements SortedKeyValueIterator<Key,Value>
   public SortedKeyValueIterator<Key,Value> deepCopy(IteratorEnvironment env) {
     AvroRowEncoderIterator copy = new AvroRowEncoderIterator();
 
-    copy.serializer = serializer;
-    copy.rootRecord = new AvroFastRecord(copy.rootRecord.getSchema());
+    copy.serializer = new AvroRowSerializer(this.rootRecord.getSchema());
+    copy.rootRecord = new AvroFastRecord(this.rootRecord.getSchema());
     copy.cellToColumnMap = AvroFastRecord.createCellToFieldMap(copy.rootRecord);
-    copy.processors = copy.processors;
+    copy.processors =
+        this.processors.stream().map(AvroRowConsumer::clone).collect(Collectors.toList());
     copy.sourceIter = sourceIter.deepCopy(env);
 
     return copy;
