@@ -90,7 +90,16 @@ public class AvroResolver extends ELResolver {
   @Override
   public Object invoke(ELContext context, Object base, Object method, Class<?>[] paramTypes,
       Object[] params) {
-    if (params.length == 1) {
+    if (method.equals("in")) {
+      if (base instanceof AvroUtf8Wrapper)
+        base = ((AvroUtf8Wrapper) base).getString();
+
+      context.setPropertyResolved(true);
+      return Arrays.binarySearch(params, base) >= 0;
+    } else if (params.length == 1) {
+      if (base instanceof AvroUtf8Wrapper)
+        base = ((AvroUtf8Wrapper) base).getString();
+
       if (base instanceof String) {
         String baseStr = (String) base;
         String paramStr = (String) params[0];
@@ -110,32 +119,7 @@ public class AvroResolver extends ELResolver {
           context.setPropertyResolved(true);
           return baseStr.contains(paramStr);
         }
-      } else if (base instanceof AvroUtf8Wrapper) {
-        AvroUtf8Wrapper baseStr = (AvroUtf8Wrapper) base;
-        String paramStr = (String) params[0];
-
-        // Spark methods available for pushdown
-        if (method.equals("endsWith")) {
-          context.setPropertyResolved(true);
-          return baseStr.endsWith(paramStr);
-        }
-
-        if (method.equals("startsWith")) {
-          context.setPropertyResolved(true);
-          return baseStr.startsWith(paramStr);
-        }
-
-        if (method.equals("contains")) {
-          context.setPropertyResolved(true);
-          return baseStr.contains(paramStr);
-        }
       }
-    } else if (method.equals("in")) {
-      if (base instanceof AvroUtf8Wrapper)
-        base = ((AvroUtf8Wrapper) base).getString();
-
-      context.setPropertyResolved(true);
-      return Arrays.binarySearch(params, base) >= 0;
     }
 
     return null;

@@ -121,6 +121,6 @@ public class AvroFilterTest {
     validateFilter("${cf1.cq2.in('A','Hello','xxx')}", "key1");
 
     // test on object/property combination
-    // validateFilter("${cf1.cq2.in('A')}", "key1");
+    validateFilter("${cf1.cq2.in('Hello')}", "key1");
   }
 }
